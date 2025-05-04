@@ -12,10 +12,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
+import java.io.IOException
+import java.net.SocketTimeoutException
 
 class TitleSearchActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,7 +37,7 @@ class TitleSearchActivity : ComponentActivity() {
 fun TitleSearchScreen() {
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<String>>(emptyList()) }
-    var message by remember { mutableStateOf("") } // For feedback
+    var message by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -43,7 +48,7 @@ fun TitleSearchScreen() {
     ) {
         TextField(
             value = searchQuery,
-            onValueChange = { searchQuery = it.trim() }, // Trim input
+            onValueChange = { searchQuery = it.trim() },
             label = { Text("Title Substring") },
             modifier = Modifier.fillMaxWidth()
         )
@@ -55,6 +60,7 @@ fun TitleSearchScreen() {
                 scope.launch {
                     isLoading = true
                     message = ""
+                    searchResults = emptyList()
                     try {
                         Log.d("TitleSearch", "Searching for title: '$searchQuery'")
                         searchResults = fetchMoviesByTitle(searchQuery)
@@ -63,9 +69,21 @@ fun TitleSearchScreen() {
                         } else {
                             "No movies found for '$searchQuery'"
                         }
+                    } catch (e: SocketTimeoutException) {
+                        Log.e("TitleSearch", "Timeout error: ${e.message}", e)
+                        message = "Error: Connection timed out. Check your internet or try again."
+                    } catch (e: IOException) {
+                        Log.e("TitleSearch", "Network error: ${e.message}", e)
+                        message = "Error: Check your internet connection or OMDB server availability"
                     } catch (e: Exception) {
-                        Log.e("TitleSearch", "Error searching titles: ${e.message}")
-                        message = "Error: ${e.message}"
+                        Log.e("TitleSearch", "Search error: ${e.message}", e)
+                        message = when (e.message) {
+                            "Invalid API key" -> "Error: Invalid OMDB API key (5f1ba1ac). Test in browser: https://www.omdbapi.com/?s=Matrix&apikey=5f1ba1ac or request a new key at http://www.omdbapi.com/apikey.aspx."
+                            "Request limit reached" -> "Error: API rate limit exceeded for key 5f1ba1ac. Wait a few hours or request a new key."
+                            "Empty response from API" -> "Error: No response from OMDB API. Test the API key or server status."
+                            "Server error" -> "Error: OMDB server error. Try again later or check server status."
+                            else -> "Error: ${e.message ?: "Failed to search movies"}"
+                        }
                     } finally {
                         isLoading = false
                     }
@@ -82,7 +100,11 @@ fun TitleSearchScreen() {
         if (message.isNotBlank()) {
             Text(
                 text = message,
-                color = if (message.contains("Error")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                color = if (message.contains("Error") || message.contains("No movies found")) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                }
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -110,23 +132,46 @@ fun TitleSearchScreen() {
 }
 
 private suspend fun fetchMoviesByTitle(title: String): List<String> {
-    val apiKey = "5f1ba1ac" // Your OMDB API key
-    val encodedTitle = title.replace(" ", "+") // Encode spaces for URL
-    val url = URL("https://www.omdbapi.com/?s=$encodedTitle&apikey=$apiKey")
-    val connection = url.openConnection() as HttpURLConnection
-    val results = mutableListOf<String>()
+    return withContext(Dispatchers.IO) {
+        val apiKey = "5f1ba1ac" // Verify this key by testing in browser: https://www.omdbapi.com/?s=Matrix&apikey=5f1ba1ac
+        val encodedTitle = URLEncoder.encode(title, "UTF-8").replace("+", "%20")
+        val urlString = "https://www.omdbapi.com/?s=$encodedTitle&apikey=$apiKey"
+        Log.d("TitleSearch", "Request URL: $urlString")
+        val url = URL(urlString)
+        val connection = url.openConnection() as HttpURLConnection
+        val results = mutableListOf<String>()
 
-    return try {
-        connection.requestMethod = "GET"
-        connection.connectTimeout = 5000 // 5 seconds
-        connection.readTimeout = 5000
-        if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-            val inputStream = connection.inputStream
-            val reader = inputStream.bufferedReader()
-            val response = reader.use { it.readText() }
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 20000 // 20 seconds
+            connection.readTimeout = 20000
+            connection.setRequestProperty("Accept", "application/json")
+            Log.d("TitleSearch", "Attempting to connect to OMDB API")
+            connection.connect()
+            val responseCode = connection.responseCode
+            Log.d("TitleSearch", "HTTP response code: $responseCode")
+            val responseHeaders = connection.headerFields.entries.joinToString { "${it.key}: ${it.value}" }
+            Log.d("TitleSearch", "Response headers: $responseHeaders")
+            val response = if (responseCode == HttpURLConnection.HTTP_OK) {
+                val inputStream = connection.inputStream
+                val reader = inputStream.bufferedReader()
+                reader.use { it.readText() }
+            } else {
+                val errorStream = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                Log.d("TitleSearch", "Error stream: $errorStream")
+                val errorMessage = when (responseCode) {
+                    401 -> "Invalid API key"
+                    429 -> "Request limit reached"
+                    500 -> "Server error"
+                    else -> "HTTP $responseCode: ${errorStream.ifBlank { "Unknown error" }}"
+                }
+                throw Exception(errorMessage)
+            }
+            if (response.isBlank()) {
+                throw Exception("Empty response from API")
+            }
+            Log.d("TitleSearch", "Raw API response: $response")
             val json = JSONObject(response)
-            Log.d("TitleSearch", "API response: $response")
-
             if (json.getString("Response") == "True") {
                 val moviesArray = json.getJSONArray("Search")
                 for (i in 0 until moviesArray.length()) {
@@ -134,15 +179,14 @@ private suspend fun fetchMoviesByTitle(title: String): List<String> {
                     results.add("${movie.getString("Title")} (${movie.getString("Year")})")
                 }
             } else {
-                Log.d("TitleSearch", "API error: ${json.getString("Error")}")
+                Log.d("TitleSearch", "API error: ${json.optString("Error", "Unknown error")}")
             }
             results
-        } else {
-            throw Exception("HTTP error code: ${connection.responseCode}")
+        } catch (e: Exception) {
+            Log.e("TitleSearch", "Network error: ${e.message}", e)
+            throw e
+        } finally {
+            connection.disconnect()
         }
-    } catch (e: Exception) {
-        throw e // Rethrow for coroutine to handle
-    } finally {
-        connection.disconnect()
     }
 }
