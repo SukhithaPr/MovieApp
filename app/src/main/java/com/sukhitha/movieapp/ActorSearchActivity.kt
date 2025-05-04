@@ -1,6 +1,7 @@
 package com.sukhitha.movieapp
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -29,6 +30,7 @@ class ActorSearchActivity : ComponentActivity() {
 fun ActorSearchScreen() {
     var actorName by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<Movie>>(emptyList()) }
+    var message by remember { mutableStateOf("") } // For feedback
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val db = remember { AppDatabase.getDatabase(context) }
@@ -40,7 +42,7 @@ fun ActorSearchScreen() {
     ) {
         TextField(
             value = actorName,
-            onValueChange = { actorName = it },
+            onValueChange = { actorName = it.trim() }, // Trim input
             label = { Text("Actor Name") },
             modifier = Modifier.fillMaxWidth()
         )
@@ -49,8 +51,23 @@ fun ActorSearchScreen() {
 
         Button(
             onClick = {
+                Log.d("ActorSearch", "Searching for actor: '$actorName'")
                 scope.launch {
-                    searchResults = db.movieDao().searchByActor(actorName)
+                    try {
+                        searchResults = db.movieDao().searchByActor(actorName)
+                        Log.d("ActorSearch", "Query: '$actorName', Results: ${searchResults.size}")
+                        searchResults.forEach {
+                            Log.d("ActorSearch", "Found movie: ${it.title}, Actors: ${it.actors}")
+                        }
+                        message = if (searchResults.isNotEmpty()) {
+                            "Found ${searchResults.size} actors for '$actorName'"
+                        } else {
+                            "No movies found for '$actorName'"
+                        }
+                    } catch (e: Exception) {
+                        Log.e("ActorSearch", "Error searching for actor: ${e.message}")
+                        message = "Error searching: ${e.message}"
+                    }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -60,6 +77,14 @@ fun ActorSearchScreen() {
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+
+        if (message.isNotBlank()) {
+            Text(
+                text = message,
+                color = if (message.contains("Error")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         val scrollState = rememberScrollState()
         Column(
@@ -74,8 +99,6 @@ fun ActorSearchScreen() {
                     Text("Actors: ${movie.actors}")
                     Divider(modifier = Modifier.padding(vertical = 8.dp))
                 }
-            } else if (actorName.isNotBlank()) {
-                Text("No movies found with this actor")
             }
         }
     }
